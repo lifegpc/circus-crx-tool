@@ -80,10 +80,6 @@ pub fn auto(input: &str) -> anyhow::Result<()> {
         println!("{}", output_path.display());
         utils::make_sure_dir_exists(&output_path)?;
         crx.write_to_file(&output_path)?;
-        return Err(anyhow::anyhow!(
-            "CRX file exported to: {}",
-            output_path.display()
-        ));
     }
     Ok(())
 }
