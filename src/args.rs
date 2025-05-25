@@ -15,7 +15,22 @@ pub struct Arg {
 #[derive(Subcommand, Debug)]
 /// Commands
 pub enum Command {
-    Export { input: String, output: String },
+    /// Export CRX files
+    Export {
+        /// Input CRX file
+        input: String,
+        /// Output path to exported PNG file
+        output: String,
+    },
+    /// Import PNG to CRX files
+    Import {
+        /// Original CRX file
+        origin: String,
+        /// PNG file to import
+        input: String,
+        /// Output path for the new CRX file
+        output: String,
+    },
 }
 
 #[derive(Parser, Debug)]

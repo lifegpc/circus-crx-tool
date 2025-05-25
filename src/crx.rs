@@ -1,4 +1,4 @@
-use crate::ext::*;
+use crate::{ext::*, utils};
 use anyhow::Result;
 use std::{
     io::{Read, Seek, Write},
@@ -96,8 +96,12 @@ impl Crx {
         let mut compressed_data = Vec::with_capacity(comp_size as usize);
         compressed_data.resize(comp_size as usize, 0);
         file.read_exact(&mut compressed_data)?;
-        let adata = fdeflate::decompress_to_vec(&compressed_data)
-            .map_err(|e| anyhow::anyhow!("Failed to decompress CRX data: {:?}", e))?;
+        let adata = if compressed_data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+            crate::utils::decompress_data(&compressed_data)?
+        } else {
+            fdeflate::decompress_to_vec(&compressed_data)
+                .map_err(|e| anyhow::anyhow!("Failed to decompress CRX data: {:?}", e))?
+        };
         let pixel_size = if bpp == 0 { 3 } else { 4 };
         eprintln!("Image pixel size: {}", pixel_size);
         let size = width as usize * height as usize * pixel_size as usize;
@@ -134,6 +138,62 @@ impl Crx {
         Ok(())
     }
 
+    pub fn import_png<F: AsRef<Path> + ?Sized>(&mut self, filename: &F) -> Result<()> {
+        let f = std::fs::File::open(filename)?;
+        let mut decoder = png::Decoder::new(f);
+        let info = decoder.read_header_info()?;
+        if info.width != self.width as u32 {
+            return Err(anyhow::anyhow!(
+                "Image width mismatch: expected {}, got {}",
+                self.width,
+                info.width
+            ));
+        }
+        if info.height != self.height as u32 {
+            return Err(anyhow::anyhow!(
+                "Image height mismatch: expected {}, got {}",
+                self.height,
+                info.height
+            ));
+        }
+        if info.bit_depth != png::BitDepth::Eight {
+            return Err(anyhow::anyhow!(
+                "Image bit depth mismatch: expected 8, got {:?}",
+                info.bit_depth
+            ));
+        }
+        if info.color_type != png::ColorType::Rgb && info.color_type != png::ColorType::Rgba {
+            return Err(anyhow::anyhow!(
+                "Image color type mismatch: expected RGB or RGBA, got {:?}",
+                info.color_type
+            ));
+        }
+        let ct = info.color_type;
+        let mut reader = decoder.read_info()?;
+        let size = self.width as usize
+            * self.height as usize
+            * if ct == png::ColorType::Rgb { 3 } else { 4 };
+        let mut data = Vec::with_capacity(size);
+        data.resize(size, 0);
+        reader.next_frame(&mut data)?;
+        let data = if self.bpp == 0 && ct == png::ColorType::Rgba {
+            Self::rgba_to_rgb(&data)
+        } else if self.bpp == 1 && ct == png::ColorType::Rgb {
+            Self::rgb_to_rgba(&data)
+        } else {
+            data
+        };
+        let edata = if self.bpp == 0 {
+            Self::encode_image_bbp24(&data, self.width, self.height)?
+        } else {
+            Self::encode_image_bbp32(&data, self.width, self.height)?
+        };
+        let compressed_data = utils::compress_data(&edata)?;
+        self.data = data;
+        self.compressed_data = compressed_data;
+        Ok(())
+    }
+
     pub fn write_to_file<F: AsRef<Path> + ?Sized>(&self, filename: &F) -> Result<()> {
         let f = std::fs::File::create(filename)?;
         let mut f = std::io::BufWriter::new(f);
@@ -147,7 +207,7 @@ impl Crx {
         f.write_i16(self.width)?;
         f.write_i16(self.height)?;
         f.write_i16(self.version)?;
-        f.write_i16(self.flags)?;
+        f.write_i16(self.flags | 0x10)?;
         f.write_i16(self.bpp)?;
         f.write_i16(self.unknown)?;
         if self.version >= 3 {
@@ -162,9 +222,7 @@ impl Crx {
                 f.write_i16(clip.field_e)?;
             }
         }
-        if (self.flags & 0x10) != 0 {
-            f.write_i32(self.compressed_data.len() as i32)?;
-        }
+        f.write_i32(self.compressed_data.len() as i32)?;
         f.write_all(&self.compressed_data)?;
         Ok(())
     }
@@ -371,7 +429,115 @@ impl Crx {
                 dst[p + 2] = b;
                 dst[p + 3] = 0xff - a;
             }
+        } else if pixel_size == 3 {
+            for p in (0..dst.len()).step_by(3) {
+                let b = dst[p + 0];
+                let g = dst[p + 1];
+                let r = dst[p + 2];
+                dst[p + 0] = r;
+                dst[p + 1] = g;
+                dst[p + 2] = b;
+            }
         }
         Ok(())
+    }
+
+    fn encode_bpp24_row0(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let mut src_p = y as usize * width as usize * 3;
+        dst[dst_p] = src[src_p + 2];
+        dst[dst_p + 1] = src[src_p + 1];
+        dst[dst_p + 2] = src[src_p];
+        dst_p += 3;
+        src_p += 3;
+        for _ in 1..width {
+            dst[dst_p] = src[src_p + 2].overflowing_sub(src[src_p - 1]).0;
+            dst[dst_p + 1] = src[src_p + 1].overflowing_sub(src[src_p - 2]).0;
+            dst[dst_p + 2] = src[src_p].overflowing_sub(src[src_p - 3]).0;
+            dst_p += 3;
+            src_p += 3;
+        }
+        return Ok(dst_p);
+    }
+
+    fn encode_image_bbp24(src: &[u8], width: i16, height: i16) -> Result<Vec<u8>> {
+        let size = width as usize * height as usize * 3 + height as usize;
+        let mut dst = Vec::with_capacity(size);
+        dst.resize(size, 0);
+        let mut dst_p = 0;
+        for y in 0..height {
+            dst[dst_p] = 0; // Row type 0
+            dst_p += 1;
+            dst_p = Self::encode_bpp24_row0(&mut dst, dst_p, src, width, y)?;
+        }
+        Ok(dst)
+    }
+
+    fn encode_bbp32_row0(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let mut src_p = y as usize * width as usize * 4;
+        dst[dst_p] = 0xff - src[src_p + 3];
+        dst[dst_p + 1] = src[src_p + 2];
+        dst[dst_p + 2] = src[src_p + 1];
+        dst[dst_p + 3] = src[src_p];
+        dst_p += 4;
+        src_p += 4;
+        for _ in 1..width {
+            dst[dst_p] = src[src_p + 3].overflowing_sub(src[src_p - 1]).0;
+            dst[dst_p + 1] = src[src_p + 2].overflowing_sub(src[src_p - 2]).0;
+            dst[dst_p + 2] = src[src_p + 1].overflowing_sub(src[src_p - 3]).0;
+            dst[dst_p + 3] = src[src_p].overflowing_sub(src[src_p - 4]).0;
+            dst_p += 4;
+            src_p += 4;
+        }
+        return Ok(dst_p);
+    }
+
+    fn encode_image_bbp32(src: &[u8], width: i16, height: i16) -> Result<Vec<u8>> {
+        let size = width as usize * height as usize * 4 + height as usize;
+        let mut dst = Vec::with_capacity(size);
+        dst.resize(size, 0);
+        let mut dst_p = 0;
+        for y in 0..height {
+            dst[dst_p] = 0; // Row type 0
+            dst_p += 1;
+            dst_p = Self::encode_bbp32_row0(&mut dst, dst_p, src, width, y)?;
+        }
+        Ok(dst)
+    }
+
+    fn rgba_to_rgb(src: &[u8]) -> Vec<u8> {
+        let mut dst = Vec::with_capacity(src.len() / 4 * 3);
+        for chunk in src.chunks(4) {
+            if chunk.len() == 4 {
+                dst.push(chunk[0]); // R
+                dst.push(chunk[1]); // G
+                dst.push(chunk[2]); // B
+            }
+        }
+        dst
+    }
+
+    fn rgb_to_rgba(src: &[u8]) -> Vec<u8> {
+        let mut dst = Vec::with_capacity(src.len() / 3 * 4);
+        for chunk in src.chunks(3) {
+            if chunk.len() == 3 {
+                dst.push(chunk[0]); // R
+                dst.push(chunk[1]); // G
+                dst.push(chunk[2]); // B
+                dst.push(0xff); // A
+            }
+        }
+        dst
     }
 }

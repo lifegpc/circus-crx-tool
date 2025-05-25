@@ -1,3 +1,4 @@
+pub mod advdata;
 pub mod args;
 pub mod crx;
 pub mod ext;
@@ -5,8 +6,11 @@ pub mod utils;
 
 pub fn auto(input: &str) -> anyhow::Result<()> {
     let pb = std::path::PathBuf::from(input);
-    let ext = pb.extension().unwrap_or(std::ffi::OsStr::new(""));
-    if ext.to_ascii_lowercase() == "crx" {
+    let ext = pb
+        .extension()
+        .unwrap_or(std::ffi::OsStr::new(""))
+        .to_ascii_lowercase();
+    if ext == "crx" {
         let crx = crx::Crx::read_from_file(&pb)?;
         let mut pb2 = pb.clone();
         let mut failed = false;
@@ -43,7 +47,59 @@ pub fn auto(input: &str) -> anyhow::Result<()> {
         };
         utils::make_sure_dir_exists(&output_path)?;
         crx.export_png(&output_path)?;
+    } else if ext == "png" {
+        let filename = pb.file_name().ok_or(anyhow::anyhow!(
+            "Failed to get file name from path: {}",
+            pb.display()
+        ))?;
+        let mut crx_filename = std::path::PathBuf::from(filename);
+        crx_filename.set_extension("crx");
+        let crx_filename = crx_filename
+            .file_name()
+            .ok_or(anyhow::anyhow!("No filename"))?
+            .to_string_lossy()
+            .to_string();
+        println!("{}", crx_filename);
+        let data = advdata::ADV_DATA_MAP
+            .get(crx_filename.as_str())
+            .ok_or(anyhow::anyhow!(
+                "No advdata found for file: {}",
+                filename.display()
+            ))?;
+        let mut crx = crx::Crx::read_from_file(data)?;
+        crx.import_png(&pb)?;
+        let output_path = advdata::BASE_PATH.join("patched").join(
+            data.to_string_lossy()
+                .strip_prefix(&advdata::BASE_PATH.to_string_lossy().into_owned())
+                .map(|s| s.trim_start_matches("/").trim_start_matches("\\"))
+                .ok_or(anyhow::anyhow!(
+                    "Failed to strip base path from filename: {}",
+                    data.display()
+                ))?,
+        );
+        println!("{}", output_path.display());
+        utils::make_sure_dir_exists(&output_path)?;
+        crx.write_to_file(&output_path)?;
+        return Err(anyhow::anyhow!(
+            "CRX file exported to: {}",
+            output_path.display()
+        ));
     }
+    Ok(())
+}
+
+pub fn export_crx(input: &str, output: &str) -> anyhow::Result<()> {
+    let crx = crx::Crx::read_from_file(input)?;
+    utils::make_sure_dir_exists(&output)?;
+    crx.export_png(&output)?;
+    Ok(())
+}
+
+pub fn import_crx(origin: &str, input: &str, output: &str) -> anyhow::Result<()> {
+    let mut crx = crx::Crx::read_from_file(origin)?;
+    crx.import_png(input)?;
+    utils::make_sure_dir_exists(&output)?;
+    crx.write_to_file(output)?;
     Ok(())
 }
 
@@ -66,6 +122,18 @@ fn main() {
             eprintln!("Press Enter to exit program.");
             let mut s = String::new();
             let _ = std::io::stdin().read_line(&mut s);
+        }
+    }
+    if let Some(command) = args.command.as_ref() {
+        match command {
+            args::Command::Export { input, output } => export_crx(input, output).unwrap(),
+            args::Command::Import {
+                origin,
+                input,
+                output,
+            } => {
+                import_crx(origin, input, output).unwrap();
+            }
         }
     }
 }
