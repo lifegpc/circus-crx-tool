@@ -30,6 +30,25 @@ pub struct Crx {
     data: Vec<u8>,
     compressed_data: Vec<u8>,
     clips: Vec<Clip>,
+    encode_type: Vec<u8>,
+}
+
+impl std::fmt::Debug for Crx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Crx")
+            .field("inner_x", &self.inner_x)
+            .field("inner_y", &self.inner_y)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("version", &self.version)
+            .field("flags", &self.flags)
+            .field("bpp", &self.bpp)
+            .field("unknown", &self.unknown)
+            .field("data_size", &self.data.len())
+            .field("compressed_data_size", &self.compressed_data.len())
+            .field("clips", &self.clips)
+            .finish()
+    }
 }
 
 impl Crx {
@@ -103,12 +122,19 @@ impl Crx {
                 .map_err(|e| anyhow::anyhow!("Failed to decompress CRX data: {:?}", e))?
         };
         let pixel_size = if bpp == 0 { 3 } else { 4 };
-        eprintln!("Image pixel size: {}", pixel_size);
         let size = width as usize * height as usize * pixel_size as usize;
         let mut data = Vec::with_capacity(size);
         data.resize(size, 0);
-        Self::decode_image(&mut data, &adata, width, height, pixel_size)?;
-        Ok(Crx {
+        let mut encode_type = Vec::with_capacity(height as usize);
+        Self::decode_image(
+            &mut data,
+            &adata,
+            width,
+            height,
+            pixel_size,
+            &mut encode_type,
+        )?;
+        let crx = Crx {
             inner_x,
             inner_y,
             width,
@@ -120,7 +146,10 @@ impl Crx {
             data,
             compressed_data,
             clips,
-        })
+            encode_type,
+        };
+        eprintln!("Image metadata: {:?}", crx);
+        Ok(crx)
     }
 
     pub fn export_png<F: AsRef<Path> + ?Sized>(&self, filename: &F) -> Result<()> {
@@ -184,9 +213,9 @@ impl Crx {
             data
         };
         let edata = if self.bpp == 0 {
-            Self::encode_image_bbp24(&data, self.width, self.height)?
+            Self::encode_image_bbp24(&data, self.width, self.height, &self.encode_type)?
         } else {
-            Self::encode_image_bbp32(&data, self.width, self.height)?
+            Self::encode_image_bbp32(&data, self.width, self.height, &self.encode_type)?
         };
         let compressed_data = utils::compress_data(&edata)?;
         self.data = data;
@@ -385,12 +414,14 @@ impl Crx {
         width: i16,
         height: i16,
         pixel_size: i8,
+        encode_type: &mut Vec<u8>,
     ) -> Result<()> {
         let mut src_p = 0;
         let mut dst_p = 0;
         let mut prev_row_p = 0;
         for _ in 0..height {
             let data = src[src_p];
+            encode_type.push(data);
             src_p += 1;
             match data {
                 0 => {
@@ -442,7 +473,7 @@ impl Crx {
         Ok(())
     }
 
-    fn encode_bpp24_row0(
+    fn encode_bbp24_row0(
         dst: &mut Vec<u8>,
         mut dst_p: usize,
         src: &[u8],
@@ -465,15 +496,168 @@ impl Crx {
         return Ok(dst_p);
     }
 
-    fn encode_image_bbp24(src: &[u8], width: i16, height: i16) -> Result<Vec<u8>> {
+    fn encode_bbp24_row1(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let mut src_p = y as usize * width as usize * 3;
+        let mut prev_row_p = (y - 1) as usize * width as usize * 3;
+        for _ in 0..width {
+            dst[dst_p] = src[src_p + 2].overflowing_sub(src[prev_row_p + 2]).0;
+            dst[dst_p + 1] = src[src_p + 1].overflowing_sub(src[prev_row_p + 1]).0;
+            dst[dst_p + 2] = src[src_p].overflowing_sub(src[prev_row_p]).0;
+            dst_p += 3;
+            src_p += 3;
+            prev_row_p += 3;
+        }
+        Ok(dst_p)
+    }
+
+    fn encode_bbp24_row2(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let mut src_p = y as usize * width as usize * 3;
+        let mut prev_row_p = (y - 1) as usize * width as usize * 3;
+        dst[dst_p] = src[src_p + 2];
+        dst[dst_p + 1] = src[src_p + 1];
+        dst[dst_p + 2] = src[src_p];
+        dst_p += 3;
+        src_p += 3;
+        for _ in 1..width {
+            dst[dst_p] = src[src_p + 2].overflowing_sub(src[prev_row_p + 2]).0;
+            dst[dst_p + 1] = src[src_p + 1].overflowing_sub(src[prev_row_p + 1]).0;
+            dst[dst_p + 2] = src[src_p].overflowing_sub(src[prev_row_p]).0;
+            dst_p += 3;
+            src_p += 3;
+            prev_row_p += 3;
+        }
+        Ok(dst_p)
+    }
+
+    fn encode_bbp24_row3(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let mut src_p = y as usize * width as usize * 3;
+        let mut prev_row_p = (y - 1) as usize * width as usize * 3 + 3;
+        for _ in 0..width - 1 {
+            dst[dst_p] = src[src_p + 2].overflowing_sub(src[prev_row_p + 2]).0;
+            dst[dst_p + 1] = src[src_p + 1].overflowing_sub(src[prev_row_p + 1]).0;
+            dst[dst_p + 2] = src[src_p].overflowing_sub(src[prev_row_p]).0;
+            dst_p += 3;
+            src_p += 3;
+            prev_row_p += 3;
+        }
+        dst[dst_p] = src[src_p + 2];
+        dst[dst_p + 1] = src[src_p + 1];
+        dst[dst_p + 2] = src[src_p];
+        dst_p += 3;
+        Ok(dst_p)
+    }
+
+    fn encode_bbp24_row4(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let src_p = y as usize * width as usize * 3;
+        for offset in 0..3 {
+            let mut src_c = src_p + 2 - offset as usize;
+            let mut remaining = width;
+            let value = src[src_c];
+            src_c += 3;
+            dst[dst_p] = value;
+            dst_p += 1;
+            remaining -= 1;
+            if remaining == 0 {
+                continue;
+            }
+            let mut count = 0;
+            loop {
+                if count as i16 >= remaining || count >= 255 || src[src_c] != value {
+                    break;
+                }
+                src_c += 3;
+                count += 1;
+            }
+            if count > 0 {
+                dst[dst_p] = value;
+                dst_p += 1;
+                dst[dst_p] = count;
+                dst_p += 1;
+                remaining -= count as i16;
+            }
+            while remaining > 0 {
+                let value = src[src_c];
+                src_c += 3;
+                dst[dst_p] = value;
+                dst_p += 1;
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+                let mut count = 0;
+                loop {
+                    if count as i16 >= remaining || count >= 255 || src[src_c] != value {
+                        break;
+                    }
+                    src_c += 3;
+                    count += 1;
+                }
+                if count > 0 {
+                    dst[dst_p] = value;
+                    dst_p += 1;
+                    dst[dst_p] = count;
+                    dst_p += 1;
+                    remaining -= count as i16;
+                }
+            }
+        }
+        Ok(dst_p)
+    }
+
+    fn encode_image_bbp24(src: &[u8], width: i16, height: i16, row_type: &[u8]) -> Result<Vec<u8>> {
         let size = width as usize * height as usize * 3 + height as usize;
         let mut dst = Vec::with_capacity(size);
         dst.resize(size, 0);
         let mut dst_p = 0;
         for y in 0..height {
-            dst[dst_p] = 0; // Row type 0
+            let data = row_type[y as usize];
+            dst[dst_p] = data;
             dst_p += 1;
-            dst_p = Self::encode_bpp24_row0(&mut dst, dst_p, src, width, y)?;
+            match data {
+                0 => {
+                    dst_p = Self::encode_bbp24_row0(&mut dst, dst_p, src, width, y)?;
+                }
+                1 => {
+                    dst_p = Self::encode_bbp24_row1(&mut dst, dst_p, src, width, y)?;
+                }
+                2 => {
+                    dst_p = Self::encode_bbp24_row2(&mut dst, dst_p, src, width, y)?;
+                }
+                3 => {
+                    dst_p = Self::encode_bbp24_row3(&mut dst, dst_p, src, width, y)?;
+                }
+                4 => {
+                    eprintln!("Encoding row type 4 on y={}", y);
+                    dst_p = Self::encode_bbp24_row4(&mut dst, dst_p, src, width, y)?;
+                }
+                _ => {
+                    return Err(anyhow::anyhow!("Invalid row type: {}", data));
+                }
+            }
         }
         Ok(dst)
     }
@@ -505,15 +689,178 @@ impl Crx {
         return Ok(dst_p);
     }
 
-    fn encode_image_bbp32(src: &[u8], width: i16, height: i16) -> Result<Vec<u8>> {
+    fn encode_bbp32_row1(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let mut src_p = y as usize * width as usize * 4;
+        let mut prev_row_p = (y - 1) as usize * width as usize * 4;
+        for _ in 0..width {
+            dst[dst_p] = (0xff - src[src_p + 3])
+                .overflowing_sub(0xff - src[prev_row_p + 3])
+                .0;
+            dst[dst_p + 1] = src[src_p + 2].overflowing_sub(src[prev_row_p + 2]).0;
+            dst[dst_p + 2] = src[src_p + 1].overflowing_sub(src[prev_row_p + 1]).0;
+            dst[dst_p + 3] = src[src_p].overflowing_sub(src[prev_row_p]).0;
+            dst_p += 4;
+            src_p += 4;
+            prev_row_p += 4;
+        }
+        Ok(dst_p)
+    }
+
+    fn encode_bbp32_row2(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let mut src_p = y as usize * width as usize * 4;
+        let mut prev_row_p = (y - 1) as usize * width as usize * 4;
+        dst[dst_p] = 0xff - src[src_p + 3];
+        dst[dst_p + 1] = src[src_p + 2];
+        dst[dst_p + 2] = src[src_p + 1];
+        dst[dst_p + 3] = src[src_p];
+        dst_p += 4;
+        src_p += 4;
+        for _ in 1..width {
+            dst[dst_p] = (0xff - src[src_p + 3])
+                .overflowing_sub(0xff - src[prev_row_p + 3])
+                .0;
+            dst[dst_p + 1] = src[src_p + 2].overflowing_sub(src[prev_row_p + 2]).0;
+            dst[dst_p + 2] = src[src_p + 1].overflowing_sub(src[prev_row_p + 1]).0;
+            dst[dst_p + 3] = src[src_p].overflowing_sub(src[prev_row_p]).0;
+            dst_p += 4;
+            src_p += 4;
+            prev_row_p += 4;
+        }
+        Ok(dst_p)
+    }
+
+    fn encode_bbp32_row3(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let mut src_p = y as usize * width as usize * 4;
+        let mut prev_row_p = (y - 1) as usize * width as usize * 4 + 4;
+        for _ in 0..width - 1 {
+            dst[dst_p] = (0xff - src[src_p + 3])
+                .overflowing_sub(0xff - src[prev_row_p + 3])
+                .0;
+            dst[dst_p + 1] = src[src_p + 2].overflowing_sub(src[prev_row_p + 2]).0;
+            dst[dst_p + 2] = src[src_p + 1].overflowing_sub(src[prev_row_p + 1]).0;
+            dst[dst_p + 3] = src[src_p].overflowing_sub(src[prev_row_p]).0;
+            dst_p += 4;
+            src_p += 4;
+            prev_row_p += 4;
+        }
+        dst[dst_p] = 0xff - src[src_p + 3];
+        dst[dst_p + 1] = src[src_p + 2];
+        dst[dst_p + 2] = src[src_p + 1];
+        dst[dst_p + 3] = src[src_p];
+        dst_p += 4;
+        Ok(dst_p)
+    }
+
+    fn encode_bbp32_row4(
+        dst: &mut Vec<u8>,
+        mut dst_p: usize,
+        src: &[u8],
+        width: i16,
+        y: i16,
+    ) -> Result<usize> {
+        let src_p = y as usize * width as usize * 4;
+        for offset in 0..4 {
+            let mut src_c = src_p + 3 - offset as usize;
+            let mut remaining = width;
+            let value = src[src_c];
+            src_c += 4;
+            dst[dst_p] = if offset == 0 { 0xff - value } else { value };
+            dst_p += 1;
+            remaining -= 1;
+            if remaining == 0 {
+                continue;
+            }
+            let mut count = 0u8;
+            loop {
+                if count as i16 >= remaining || count >= 255 || src[src_c] != value {
+                    break;
+                }
+                src_c += 4;
+                count += 1;
+            }
+            if count > 0 {
+                dst[dst_p] = if offset == 0 { 0xff - value } else { value };
+                dst_p += 1;
+                dst[dst_p] = count;
+                dst_p += 1;
+                remaining -= count as i16;
+            }
+            while remaining > 0 {
+                let value = src[src_c];
+                src_c += 4;
+                dst[dst_p] = if offset == 0 { 0xff - value } else { value };
+                dst_p += 1;
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+                let mut count = 0u8;
+                loop {
+                    if count as i16 >= remaining || count >= 255 || src[src_c] != value {
+                        break;
+                    }
+                    src_c += 4;
+                    count += 1;
+                }
+                if count > 0 {
+                    dst[dst_p] = if offset == 0 { 0xff - value } else { value };
+                    dst_p += 1;
+                    dst[dst_p] = count;
+                    dst_p += 1;
+                    remaining -= count as i16;
+                }
+            }
+        }
+        Ok(dst_p)
+    }
+
+    fn encode_image_bbp32(src: &[u8], width: i16, height: i16, row_type: &[u8]) -> Result<Vec<u8>> {
         let size = width as usize * height as usize * 4 + height as usize;
         let mut dst = Vec::with_capacity(size);
         dst.resize(size, 0);
         let mut dst_p = 0;
         for y in 0..height {
-            dst[dst_p] = 0; // Row type 0
+            let data = row_type[y as usize];
+            dst[dst_p] = data;
             dst_p += 1;
-            dst_p = Self::encode_bbp32_row0(&mut dst, dst_p, src, width, y)?;
+            match data {
+                0 => {
+                    dst_p = Self::encode_bbp32_row0(&mut dst, dst_p, src, width, y)?;
+                }
+                1 => {
+                    dst_p = Self::encode_bbp32_row1(&mut dst, dst_p, src, width, y)?;
+                }
+                2 => {
+                    dst_p = Self::encode_bbp32_row2(&mut dst, dst_p, src, width, y)?;
+                }
+                3 => {
+                    dst_p = Self::encode_bbp32_row3(&mut dst, dst_p, src, width, y)?;
+                }
+                4 => {
+                    dst_p = Self::encode_bbp32_row4(&mut dst, dst_p, src, width, y)?;
+                }
+                _ => {
+                    return Err(anyhow::anyhow!("Invalid row type: {} on line {}", data, y));
+                }
+            }
         }
         Ok(dst)
     }
