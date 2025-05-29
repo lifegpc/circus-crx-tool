@@ -2,6 +2,7 @@ pub mod advdata;
 pub mod args;
 pub mod crx;
 pub mod ext;
+pub mod pck;
 pub mod utils;
 
 pub fn auto(input: &str) -> anyhow::Result<()> {
@@ -80,6 +81,48 @@ pub fn auto(input: &str) -> anyhow::Result<()> {
         println!("{}", output_path.display());
         utils::make_sure_dir_exists(&output_path)?;
         crx.write_to_file(&output_path)?;
+    } else if ext == "pck" {
+        let mut pck = pck::PckReader::new_from_file(&pb)?;
+        let mut pb2 = pb.clone();
+        let mut failed = false;
+        let mut removed = Vec::new();
+        while pb2
+            .file_name()
+            .is_some_and(|f| f.to_ascii_lowercase() != "advdata")
+        {
+            pb2.file_name().map(|s| removed.push(s.to_owned()));
+            if !pb2.pop() {
+                failed = true;
+                eprintln!(
+                    "Failed to find 'advdata' directory in path: {}",
+                    pb.display()
+                );
+                break;
+            }
+        }
+        if !failed {
+            pb2.file_name().map(|s| removed.push(s.to_owned()));
+            pb2.pop();
+        }
+        let output_path = if failed {
+            pb2.with_extension("")
+        } else {
+            let mut p = pb2.join("extracted");
+            loop {
+                match removed.pop() {
+                    Some(name) => p.push(name),
+                    None => break,
+                }
+            }
+            p.with_extension("")
+        };
+        std::fs::create_dir_all(&output_path)?;
+        for mut i in pck.iter_mut() {
+            let len = i.header.size as u64;
+            let crx = crx::Crx::read_from(&mut i, || Ok(len))?;
+            let op = output_path.join(&i.header.name).with_extension("png");
+            crx.export_png(&op)?;
+        }
     }
     Ok(())
 }
@@ -96,6 +139,18 @@ pub fn import_crx(origin: &str, input: &str, output: &str) -> anyhow::Result<()>
     crx.import_png(input)?;
     utils::make_sure_dir_exists(&output)?;
     crx.write_to_file(output)?;
+    Ok(())
+}
+
+pub fn unpack(input: &str, output: &str) -> anyhow::Result<()> {
+    let mut pck = pck::PckReader::new_from_file(input)?;
+    std::fs::create_dir_all(output)?;
+    for mut i in pck.iter_mut() {
+        let op = std::path::PathBuf::from(output).join(&i.header.name);
+        let f = std::fs::File::create(&op)?;
+        let mut writer = std::io::BufWriter::new(f);
+        std::io::copy(&mut i, &mut writer)?;
+    }
     Ok(())
 }
 
@@ -130,6 +185,7 @@ fn main() {
             } => {
                 import_crx(origin, input, output).unwrap();
             }
+            args::Command::Unpack { input, output } => unpack(input, output).unwrap(),
         }
     }
 }

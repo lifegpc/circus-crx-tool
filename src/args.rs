@@ -31,6 +31,12 @@ pub enum Command {
         /// Output path for the new CRX file
         output: String,
     },
+    Unpack {
+        /// Input PCK file to unpack
+        input: String,
+        /// Output directory for unpacked files
+        output: String,
+    },
 }
 
 #[derive(Parser, Debug)]
