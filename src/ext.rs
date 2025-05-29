@@ -3,6 +3,8 @@ use std::io::{Read, Result, Write};
 pub trait ExtWriter {
     fn write_i16(&mut self, value: i16) -> Result<()>;
     fn write_i32(&mut self, value: i32) -> Result<()>;
+    fn write_u32(&mut self, value: u32) -> Result<()>;
+    fn write_cstring_with_size(&mut self, value: &str, size: usize) -> Result<()>;
 }
 
 impl<W: Write> ExtWriter for W {
@@ -13,6 +15,23 @@ impl<W: Write> ExtWriter for W {
 
     fn write_i32(&mut self, value: i32) -> Result<()> {
         let bytes = value.to_le_bytes();
+        self.write_all(&bytes)
+    }
+
+    fn write_u32(&mut self, value: u32) -> Result<()> {
+        let bytes = value.to_le_bytes();
+        self.write_all(&bytes)
+    }
+
+    fn write_cstring_with_size(&mut self, value: &str, size: usize) -> Result<()> {
+        let mut bytes = value.as_bytes().to_vec();
+        if bytes.len() >= size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "String is too long for the specified size",
+            ));
+        }
+        bytes.resize(size, 0); // Pad with null bytes
         self.write_all(&bytes)
     }
 }

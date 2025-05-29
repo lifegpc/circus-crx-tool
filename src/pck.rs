@@ -1,6 +1,6 @@
-use crate::ext::ExtReader;
+use crate::ext::{ExtReader, ExtWriter};
 use anyhow::Result;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 use std::iter::Iterator;
 use std::path::Path;
 
@@ -160,6 +160,10 @@ impl<T: Read + Seek> PckReader<T> {
             reader: &mut self.reader,
         };
     }
+
+    pub fn len(&self) -> usize {
+        self.file_headers.len()
+    }
 }
 
 impl PckReader<std::io::BufReader<std::fs::File>> {
@@ -167,5 +171,131 @@ impl PckReader<std::io::BufReader<std::fs::File>> {
         let file = std::fs::File::open(p)?;
         let reader = std::io::BufReader::new(file);
         Self::new(reader)
+    }
+}
+
+pub struct PckFileWriter<'a, T: Write + Seek> {
+    header: &'a mut PckFileHeader,
+    writer: &'a mut T,
+}
+
+impl<'a, T: Write + Seek> Write for PckFileWriter<'a, T> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writer.seek(std::io::SeekFrom::Start(
+            self.header.offset as u64 + self.header.size as u64,
+        ))?;
+        let bytes_written = self.writer.write(buf)?;
+        self.header.size += bytes_written as u32;
+        Ok(bytes_written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+pub struct PckWriter<T: Write + Seek + Read> {
+    file: T,
+    file_headers: Vec<PckFileHeader>,
+    header_max_size: u32,
+}
+
+impl<T: Write + Seek + Read> PckWriter<T> {
+    pub fn new(file: T, header_max_size: u32) -> Self {
+        PckWriter {
+            file,
+            file_headers: Vec::new(),
+            header_max_size,
+        }
+    }
+
+    pub fn add_file<'a, S: AsRef<str> + ?Sized>(
+        &'a mut self,
+        name: &S,
+    ) -> Result<PckFileWriter<'a, T>> {
+        let offset = self
+            .file_headers
+            .last()
+            .map(|h| h.offset + h.size)
+            .unwrap_or(self.header_max_size);
+        self.file_headers.push(PckFileHeader {
+            name: name.as_ref().to_owned(),
+            offset,
+            size: 0,
+        });
+        self.check_header_capacity()?;
+        let header = self.file_headers.last_mut().unwrap();
+        Ok(PckFileWriter {
+            header,
+            writer: &mut self.file,
+        })
+    }
+
+    pub fn write_header(&mut self) -> Result<()> {
+        self.file.seek(std::io::SeekFrom::Start(0))?;
+        self.file.write_u32(self.file_headers.len() as u32)?;
+        for header in &self.file_headers {
+            self.file.write_u32(header.offset)?;
+            self.file.write_u32(header.size)?;
+        }
+        for header in &self.file_headers {
+            self.file.write_cstring_with_size(&header.name, 0x38)?;
+            self.file.write_u32(header.offset)?;
+            self.file.write_u32(header.size)?;
+        }
+        self.file.flush()?;
+        Ok(())
+    }
+
+    fn check_header_capacity(&mut self) -> Result<()> {
+        if self.file_headers.len() as u32 * 0x48 + 4 < self.header_max_size {
+            return Ok(());
+        }
+        let new_header_capacity = self.header_max_size + 0x800;
+        self.file
+            .seek(std::io::SeekFrom::Start(self.header_max_size as u64))?;
+        let mut buffer1 = [0; 0x800];
+        let mut buffer2 = [0; 0x800];
+        let mut buffer1_size = 0x800;
+        let mut buffer1_start = self.header_max_size as u64;
+        let mut buffer2_size;
+        loop {
+            buffer2_size = self.file.read(&mut buffer2)?;
+            self.file.seek(std::io::SeekFrom::Start(buffer1_start))?;
+            self.file.write_all(&buffer1[..buffer1_size])?;
+            buffer1_size = buffer2_size;
+            std::mem::swap(&mut buffer1, &mut buffer2);
+            buffer1_start += buffer1_size as u64;
+            if buffer2_size == 0 {
+                break;
+            }
+        }
+        for header in &mut self.file_headers {
+            header.offset += 0x800;
+        }
+        self.header_max_size = new_header_capacity;
+        self.file.flush()?;
+        Ok(())
+    }
+}
+
+impl PckWriter<std::fs::File> {
+    pub fn calculate_header_size(file_count: u32) -> u32 {
+        let mut header_size = file_count * 0x48 + 4;
+        let a = header_size % 0x800;
+        if a != 0 {
+            header_size += 0x800 - a;
+        }
+        header_size
+    }
+
+    pub fn new_from_file<P: AsRef<Path> + ?Sized>(p: &P, header_max_size: u32) -> Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(p)?;
+        Ok(Self::new(file, header_max_size))
     }
 }

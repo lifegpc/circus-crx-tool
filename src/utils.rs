@@ -14,7 +14,7 @@ pub fn make_sure_dir_exists<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
 }
 
 pub fn compress_data(data: &[u8]) -> std::io::Result<Vec<u8>> {
-    let mut encoder = Encoder::new(Vec::new(), 32)?;
+    let mut encoder = Encoder::new(Vec::new(), 22)?;
     encoder.write_all(data)?;
     Ok(encoder.finish()?)
 }

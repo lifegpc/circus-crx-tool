@@ -493,7 +493,9 @@ impl Crx {
         dst_p += 4;
         src_p += 4;
         for _ in 1..width {
-            dst[dst_p] = src[src_p + 3].overflowing_sub(src[src_p - 1]).0;
+            dst[dst_p] = (0xff - src[src_p + 3])
+                .overflowing_sub(0xff - src[src_p - 1])
+                .0;
             dst[dst_p + 1] = src[src_p + 2].overflowing_sub(src[src_p - 2]).0;
             dst[dst_p + 2] = src[src_p + 1].overflowing_sub(src[src_p - 3]).0;
             dst[dst_p + 3] = src[src_p].overflowing_sub(src[src_p - 4]).0;

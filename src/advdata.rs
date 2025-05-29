@@ -16,7 +16,7 @@ fn iter_map<P: AsRef<Path> + ?Sized>(path: &P, map: &mut CaseInsensitiveHashMap<
                 iter_map(&path, map);
             } else if path.is_file() {
                 if let Some(ext) = path.extension().map(|s| s.to_ascii_lowercase()) {
-                    if ext == "crx" {
+                    if ext == "crx" || ext == "pck" {
                         if let Some(name) = path.file_name() {
                             map.insert(
                                 name.to_string_lossy().into_owned(),

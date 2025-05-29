@@ -31,10 +31,18 @@ pub enum Command {
         /// Output path for the new CRX file
         output: String,
     },
+    /// Unpack PCK files
     Unpack {
         /// Input PCK file to unpack
         input: String,
         /// Output directory for unpacked files
+        output: String,
+    },
+    /// Pack files into a PCK file
+    Pack {
+        /// Input directory containing files to pack
+        input: String,
+        /// Output PCK file
         output: String,
     },
 }
